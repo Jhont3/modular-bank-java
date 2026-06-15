@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: ms-notifications
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/notifications_db}
+    username: ${DB_USER:notifications}
+    password: ${DB_PASSWORD:notifications}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+app:
+  kafka:
+    transfers-topic: ${TRANSFERS_TOPIC:finbank.transfers.events.v1}
+
+jwt:
+  secret: ${JWT_SECRET:modular-bank-dev-secret-change-in-production-256bit}
+
+server:
+  port: ${SERVER_PORT:8082}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: always

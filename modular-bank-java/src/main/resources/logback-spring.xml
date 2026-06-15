@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- Logs estructurados JSON (Paso 4): el agente OpenTelemetry inyecta
+         trace_id/span_id en el MDC y LogstashEncoder incluye el MDC completo. -->
+    <springProperty name="serviceName" source="spring.application.name" defaultValue="finbank-service"/>
+
+    <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <customFields>{"service":"${serviceName}"}</customFields>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="JSON"/>
+    </root>
+</configuration>

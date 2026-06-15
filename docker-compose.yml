@@ -1,0 +1,260 @@
+# FinBank — Arquitectura post-Strangler Fig (Reto Práctico #4)
+# Gateway (8080) → ms-notifications (8082) / ms-transfers (8083) / monolito remanente (8081)
+# Kafka como broker de eventos + stack completo de observabilidad.
+
+x-otel-env: &otel-env
+  JAVA_OPTS: -javaagent:/otel/opentelemetry-javaagent.jar
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  OTEL_TRACES_EXPORTER: otlp
+  OTEL_METRICS_EXPORTER: otlp
+  OTEL_LOGS_EXPORTER: otlp
+  OTEL_METRIC_EXPORT_INTERVAL: "15000"
+
+services:
+  # ───────────────────────── Bases de datos (Database-per-Service) ─────────────────────────
+  postgres-monolith:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: modular_bank
+      POSTGRES_USER: bank
+      POSTGRES_PASSWORD: bank
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bank -d modular_bank"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_monolith_data:/var/lib/postgresql/data
+
+  postgres-notifications:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: notifications_db
+      POSTGRES_USER: notifications
+      POSTGRES_PASSWORD: notifications
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notifications -d notifications_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_notifications_data:/var/lib/postgresql/data
+
+  postgres-transfers:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: transfers_db
+      POSTGRES_USER: transfers
+      POSTGRES_PASSWORD: transfers
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transfers -d transfers_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_transfers_data:/var/lib/postgresql/data
+
+  # ───────────────────────── Message Broker ─────────────────────────
+  kafka:
+    image: apache/kafka:3.7.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    ports:
+      - "29092:29092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    environment:
+      KAFKA_CLUSTERS_0_NAME: finbank
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports:
+      - "8091:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # ───────────────────────── Aplicaciones ─────────────────────────
+  monolith:
+    build: ./modular-bank-java
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: finbank-monolith
+      SERVER_PORT: "8081"
+      DB_URL: jdbc:postgresql://postgres-monolith:5432/modular_bank
+      DB_USER: bank
+      DB_PASSWORD: bank
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      JWT_SECRET: modular-bank-dev-secret-change-in-production-256bit
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres-monolith:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  ms-notifications:
+    build: ./ms-notifications
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: ms-notifications
+      SERVER_PORT: "8082"
+      DB_URL: jdbc:postgresql://postgres-notifications:5432/notifications_db
+      DB_USER: notifications
+      DB_PASSWORD: notifications
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      JWT_SECRET: modular-bank-dev-secret-change-in-production-256bit
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres-notifications:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  ms-transfers:
+    build: ./ms-transfers
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: ms-transfers
+      SERVER_PORT: "8083"
+      DB_URL: jdbc:postgresql://postgres-transfers:5432/transfers_db
+      DB_USER: transfers
+      DB_PASSWORD: transfers
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      ACCOUNTS_BASE_URL: http://monolith:8081
+      JWT_SECRET: modular-bank-dev-secret-change-in-production-256bit
+    ports:
+      - "8083:8083"
+    depends_on:
+      postgres-transfers:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  gateway:
+    build: ./gateway
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: finbank-gateway
+      SERVER_PORT: "8080"
+      MONOLITH_URI: http://monolith:8081
+      NOTIFICATIONS_URI: http://ms-notifications:8082
+      TRANSFERS_URI: http://ms-transfers:8083
+    ports:
+      - "8080:8080"
+    depends_on:
+      - monolith
+      - ms-notifications
+      - ms-transfers
+
+  # ───────────────────────── Microfrontends (punto extra) ─────────────────────────
+  # Cada MFE es un contenedor independiente: `docker compose up -d --build portal-mfe-transfers`
+  # reconstruye solo ese MFE sin tocar shell ni el otro (despliegue independiente).
+  portal-shell:
+    build:
+      context: ./portal/shell
+      args:
+        NOTIFICATIONS_MFE_URL: http://localhost:8085/mfe/notifications
+        TRANSFERS_MFE_URL: http://localhost:8085/mfe/transfers
+    ports:
+      - "8186:80"
+
+  portal-mfe-notifications:
+    build: ./portal/mfe-notifications
+    ports:
+      - "8187:80"
+
+  portal-mfe-transfers:
+    build: ./portal/mfe-transfers
+    ports:
+      - "8188:80"
+
+  portal:
+    build: ./portal/nginx
+    ports:
+      - "8085:80"
+    depends_on:
+      - portal-shell
+      - portal-mfe-notifications
+      - portal-mfe-transfers
+      - gateway
+
+  # ───────────────────────── Observabilidad ─────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.102.1
+    command: ["--config=/etc/otel/config.yml"]
+    volumes:
+      - ./observability/otel-collector.yml:/etc/otel/config.yml:ro
+    depends_on:
+      - jaeger
+      - loki
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  loki:
+    image: grafana/loki:3.0.0
+    command: ["-config.file=/etc/loki/config.yml"]
+    volumes:
+      - ./observability/loki-config.yml:/etc/loki/config.yml:ro
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    command: ["--kafka.server=kafka:9092"]
+    restart: on-failure
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+volumes:
+  postgres_monolith_data:
+  postgres_notifications_data:
+  postgres_transfers_data:

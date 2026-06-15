@@ -1,0 +1,72 @@
+spring:
+  application:
+    name: ms-transfers
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5434/transfers_db}
+    username: ${DB_USER:transfers}
+    password: ${DB_PASSWORD:transfers}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+
+app:
+  accounts:
+    base-url: ${ACCOUNTS_BASE_URL:http://localhost:8081}
+  kafka:
+    transfers-topic: ${TRANSFERS_TOPIC:finbank.transfers.events.v1}
+  outbox:
+    poll-interval-ms: 1000
+  reconciler:
+    poll-interval-ms: 30000
+
+jwt:
+  secret: ${JWT_SECRET:modular-bank-dev-secret-change-in-production-256bit}
+
+server:
+  port: ${SERVER_PORT:8083}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,circuitbreakers
+  endpoint:
+    health:
+      show-details: always
+  health:
+    circuitbreakers:
+      enabled: true
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      accounts:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 4
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        # Los errores de negocio (4xx) no son fallos del servicio: no abren el circuito
+        ignore-exceptions:
+          - com.finbank.transfers.application.ports.AccountsPort$AccountsBusinessException
+  retry:
+    instances:
+      accounts:
+        max-attempts: 3
+        wait-duration: 200ms
+        exponential-backoff-multiplier: 2
+        # Solo se reintentan fallos transitorios; nunca errores de negocio
+        retry-exceptions:
+          - com.finbank.transfers.application.ports.AccountsPort$AccountsUnavailableException
+        ignore-exceptions:
+          - com.finbank.transfers.application.ports.AccountsPort$AccountsBusinessException
